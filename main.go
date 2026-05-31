@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 
 var IsRunning = false
 var currentServer *http.Server
+var cacheWatchdogCancel context.CancelFunc
 
 func main() {
 	initLogger()
@@ -27,7 +29,7 @@ func main() {
 	rdb := initRedis()
 	defer rdb.Close()
 	initInfluxDB()
-	buildCacheIfEnabled(rdb)
+	startCacheWatchdog(rdb)
 	registerRoutes(rdb)
 	startServer()
 	waitForShutdown(rdb)
@@ -80,14 +82,34 @@ func initInfluxDB() {
 	slog.Info("InfluxDB connection established", "process", "sti_main")
 }
 
-func buildCacheIfEnabled(rdb *redis_lib.Client) {
-	if os.Getenv("STI_AUTOMATION_ENABLE") != "true" {
-		slog.Info("STI cache building is disabled", "process", "sti_main")
+func startCacheWatchdog(rdb *redis_lib.Client) {
+	refreshSeconds, err := strconv.Atoi(os.Getenv("STI_CACHE_REFRESH_SECONDS"))
+	if err != nil || refreshSeconds <= 0 {
+		slog.Warn("STI_CACHE_REFRESH_SECONDS not set or invalid, cache watchdog disabled", "value", os.Getenv("STI_CACHE_REFRESH_SECONDS"))
 		return
 	}
-	slog.Info("Building InfluxDB Cache for STI", "process", "sti_main")
+	interval := time.Duration(refreshSeconds) * time.Second
+
+	slog.Info("Building initial STI cache", "process", "sti_main")
 	BuildSTICache(rdb)
-	slog.Info("InfluxDB Cache built successfully", "process", "sti_main")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cacheWatchdogCancel = cancel
+
+	go func() {
+		slog.Info("STI cache watchdog started", "interval_seconds", refreshSeconds, "process", "sti_main")
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				slog.Info("STI cache watchdog stopped", "process", "sti_main")
+				return
+			case <-ticker.C:
+				BuildSTICache(rdb)
+			}
+		}
+	}()
 }
 
 func registerRoutes(rdb *redis_lib.Client) {
@@ -125,6 +147,10 @@ func waitForShutdown(rdb *redis_lib.Client) {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-sigCh
 	slog.Info("Received signal, shutting down STI service", "signal", sig.String())
+
+	if cacheWatchdogCancel != nil {
+		cacheWatchdogCancel()
+	}
 
 	if IsRunning {
 		slog.Info("Shutting down HTTP server", "process", "sti_main")

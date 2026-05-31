@@ -57,6 +57,11 @@ type PpjTreeSensor struct {
 	UpdatedAt              *string `db:"updated_at"`
 }
 
+type EnrichedTreeSensor struct {
+	PpjTreeSensor
+	BatteryLevel *float64 `json:"battery_level"`
+}
+
 func NewPostgresStorage(db *sql.DB) *PostgresStorage {
 	if db != nil {
 		return &PostgresStorage{DB: db}

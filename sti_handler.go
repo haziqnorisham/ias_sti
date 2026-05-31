@@ -3,26 +3,16 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	influxdb_utils "ias_sti/db/influxdb"
 
 	ias_pg "ias_sti/db/pg"
 	"log/slog"
 	"net/http"
-	"os"
-	"strconv"
 	"strings"
-	"sync"
-	"time"
 
 	redis_lib "github.com/redis/go-redis/v9"
 
 	"github.com/influxdata/influxdb-client-go/v2/api"
-)
-
-var (
-	cacheRebuildMu  sync.Mutex
-	cacheRebuilding bool
 )
 
 func getAllTreeSensorHandler(w http.ResponseWriter, r *http.Request, rdb *redis_lib.Client) {
@@ -35,45 +25,23 @@ func getAllTreeSensorHandler(w http.ResponseWriter, r *http.Request, rdb *redis_
 }
 
 func getAllTreeSensor(rdb *redis_lib.Client, c context.Context) []byte {
-	// Get All Tree Sensor Data
-	// Check Redis Cache First
 	cacheKey := "all_tree_sensors"
 	cachedData, err := rdb.Get(c, cacheKey).Result()
 	if err == nil && cachedData != "null" {
-		// Cache hit, return cached data
-		return_val := []byte(cachedData)
-		return return_val
+		return []byte(cachedData)
 	}
 
-	cacheRebuildMu.Lock()
-	rebuilding := cacheRebuilding
-	cacheRebuildMu.Unlock()
-	if rebuilding {
-		return []byte(`{"error":"cache is building, please try again"}`)
-	}
-
-	// Get sensors data if cache miss
 	pg_storage := ias_pg.NewPostgresStorage(nil)
 	sensors, err := pg_storage.QueryData("select * from ppj_tree_sensor")
 	if err != nil {
-		print(err)
+		slog.Error("getAllTreeSensor: PG query failed", "error", err)
+		return []byte(`{"error":"failed to query database"}`)
 	}
 
-	// Encode sensors to JSON for both caching and response
 	jsonData, err := json.Marshal(sensors)
 	if err != nil {
-		print(err)
-	}
-	// Write to cache with expiration (e.g., 5 minutes)
-	cache_invalidation_seconds, err := strconv.Atoi(os.Getenv("REDIS_INVALIDATION_SECOND"))
-	if err != nil {
-		cache_invalidation_seconds = 60 // Default to 5 minutes if env variable is not set or invalid
-	}
-	cacheExpiration := time.Duration(cache_invalidation_seconds) * time.Second
-	err = rdb.Set(c, cacheKey, jsonData, cacheExpiration).Err()
-	if err != nil {
-		// Log cache write error but don't fail the request
-		// You might want to log this: log.Printf("Failed to write to cache: %v", err)
+		slog.Error("getAllTreeSensor: marshal failed", "error", err)
+		return []byte(`{"error":"failed to encode response"}`)
 	}
 	return jsonData
 }
@@ -219,7 +187,7 @@ func createCacheFromInfluxDB(rdb *redis_lib.Client, influx_result *api.QueryTabl
 
 		results = append(results, row)
 		marshelled_json, _ := json.Marshal(row)
-		err := rdb.Set(c, prefix+row["dev_eui"].(string), marshelled_json, 60*time.Second).Err()
+		err := rdb.Set(c, prefix+row["dev_eui"].(string), marshelled_json, 0).Err()
 		// cachedData, _ := rdb.Get(c, "battery:"+row["dev_eui"].(string)).Result()
 		if err != nil {
 			println("Error writing to cache:", err.Error())
@@ -228,98 +196,89 @@ func createCacheFromInfluxDB(rdb *redis_lib.Client, influx_result *api.QueryTabl
 	}
 }
 
-func BuildSTICache(rdb *redis_lib.Client) bool {
-	cacheRebuildMu.Lock()
-	if cacheRebuilding {
-		cacheRebuildMu.Unlock()
-		return false
-	}
-	cacheRebuilding = true
-	cacheRebuildMu.Unlock()
-
-	defer func() {
-		cacheRebuildMu.Lock()
-		cacheRebuilding = false
-		cacheRebuildMu.Unlock()
-	}()
-
-	// Get All Tree Sensor Data
-	var sensor_array []ias_pg.PpjTreeSensor
+func BuildSTICache(rdb *redis_lib.Client) {
 	c := context.Background()
-	sensors := getAllTreeSensor(rdb, c)
-	json.Unmarshal(sensors, &sensor_array)
 
-	query := buildFluxQueryForTreeSensorBattery(sensor_array)
+	pg_storage := ias_pg.NewPostgresStorage(nil)
+	sensors, err := pg_storage.QueryData("select * from ppj_tree_sensor")
+	if err != nil {
+		slog.Error("BuildSTICache: PG query failed", "error", err)
+		return
+	}
 
+	query := buildFluxQueryForTreeSensorBattery(sensors)
 	influx_result, err := influxdb_utils.RunQuery(query)
 	if err == nil {
 		createCacheFromInfluxDB(rdb, influx_result, c, "battery:")
+	} else {
+		slog.Error("BuildSTICache: battery query failed", "error", err)
 	}
 
-	query = buildFluxQueryForTreeSensorAngles(sensor_array)
-
+	query = buildFluxQueryForTreeSensorAngles(sensors)
 	influx_result, err = influxdb_utils.RunQuery(query)
 	if err == nil {
 		createCacheFromInfluxDB(rdb, influx_result, c, "angle:")
+	} else {
+		slog.Error("BuildSTICache: angle query failed", "error", err)
 	}
 
-	query = buildFluxQueryForTreeSensorMagnitudeMax(sensor_array)
-
+	query = buildFluxQueryForTreeSensorMagnitudeMax(sensors)
 	influx_result, err = influxdb_utils.RunQuery(query)
 	if err == nil {
 		createCacheFromInfluxDB(rdb, influx_result, c, "magnitude_max:")
+	} else {
+		slog.Error("BuildSTICache: magnitude_max query failed", "error", err)
 	}
 
-	query = buildFluxQueryForTreeSensorMagnitudeMin(sensor_array)
-
+	query = buildFluxQueryForTreeSensorMagnitudeMin(sensors)
 	influx_result, err = influxdb_utils.RunQuery(query)
 	if err == nil {
 		createCacheFromInfluxDB(rdb, influx_result, c, "magnitude_min:")
+	} else {
+		slog.Error("BuildSTICache: magnitude_min query failed", "error", err)
 	}
 
-	return true
+	enriched := make([]ias_pg.EnrichedTreeSensor, 0, len(sensors))
+	for _, sensor := range sensors {
+		e := ias_pg.EnrichedTreeSensor{PpjTreeSensor: sensor}
+		batteryJSON, berr := rdb.Get(c, "battery:"+sensor.DeviceEUI).Result()
+		if berr == nil {
+			var batteryMap map[string]interface{}
+			if json.Unmarshal([]byte(batteryJSON), &batteryMap) == nil {
+				if v, ok := batteryMap["_value"].(float64); ok {
+					e.BatteryLevel = &v
+				}
+			}
+		}
+		enriched = append(enriched, e)
+	}
+
+	jsonData, err := json.Marshal(enriched)
+	if err != nil {
+		slog.Error("BuildSTICache: failed to marshal enriched sensors", "error", err)
+		return
+	}
+
+	err = rdb.Set(c, "all_tree_sensors", jsonData, 0).Err()
+	if err != nil {
+		slog.Error("BuildSTICache: failed to cache enriched sensors", "error", err)
+	}
 }
 
 func getTreeSensorBatteryFromCache(rdb *redis_lib.Client, c context.Context, devEUI string) ([]byte, error) {
-	// Check Redis Cache First
 	cachedData, err := rdb.Get(c, "battery:"+devEUI).Result()
-	if err == nil {
-		return []byte(cachedData), nil
-	}
-
-	// If cache miss, trigger cache re-build
-	if !BuildSTICache(rdb) {
-		return nil, errors.New("cache is building, please try again")
-	}
-
-	// Try to get from cache again after rebuild
-	cachedData, err = rdb.Get(c, "battery:"+devEUI).Result()
 	if err != nil {
 		return nil, err
 	}
 	return []byte(cachedData), nil
-
 }
 
 func getTreeSensorAngleFromCache(rdb *redis_lib.Client, c context.Context, devEUI string) ([]byte, error) {
-	// Check Redis Cache First
 	cachedData, err := rdb.Get(c, "angle:"+devEUI).Result()
-	if err == nil {
-		return []byte(cachedData), nil
-	}
-
-	// If cache miss, trigger cache re-build
-	if !BuildSTICache(rdb) {
-		return nil, errors.New("cache is building, please try again")
-	}
-
-	// Try to get from cache again after rebuild
-	cachedData, err = rdb.Get(c, "angle:"+devEUI).Result()
 	if err != nil {
 		return nil, err
 	}
 	return []byte(cachedData), nil
-
 }
 
 func getTreeSensorMagnitudeMinFromCache(rdb *redis_lib.Client, c context.Context, devEUI string) ([]byte, error) {
