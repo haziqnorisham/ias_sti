@@ -1,7 +1,7 @@
 BINARY      = ias_sti
 IMAGE       = ias_sti:latest
 
-.PHONY: build build-linux build-mac docker-build docker-run clean
+.PHONY: build build-linux build-mac docker-build docker-run compose-up compose-down clean
 
 build: build-linux
 
@@ -16,6 +16,12 @@ docker-build: build-linux
 
 docker-run:
 	docker run -p 8080:8080 --env-file .env $(IMAGE)
+
+compose-up:
+	docker compose up -d
+
+compose-down:
+	docker compose down
 
 clean:
 	rm -f $(BINARY)
