@@ -45,10 +45,10 @@ func initLogger() {
 
 func loadEnv() {
 	if err := godotenv.Load(".env"); err != nil {
-		slog.Error("Failed to load .env file", "error", err)
-		os.Exit(1)
+		slog.Warn("No .env file found, using runtime environment variables", "error", err)
+		return
 	}
-	slog.Info("Environment variables loaded", "process", "sti_main")
+	slog.Info("Environment variables loaded from .env", "process", "sti_main")
 }
 
 func initSharedPool() {
