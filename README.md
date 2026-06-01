@@ -24,8 +24,11 @@ Client → Go HTTP Server → Redis (cache)
 - **PostgreSQL** with a `ppj_tree_sensor` table
 - **InfluxDB** with a `STI` bucket populated with sensor data
 - **Redis**
+- **Docker** & **Docker Compose** (optional, for containerized deployment)
 
 ## Quick Start
+
+### Local Development
 
 ```bash
 cp .env.example .env
@@ -34,6 +37,10 @@ go run .
 ```
 
 The server listens on the port specified in `HTTP_SERVER_PORT` (default: `8081`).
+
+### Docker Deployment
+
+See [Build & Deploy](#build--deploy) for containerized deployment with Docker Compose.
 
 ## Environment Variables
 
@@ -55,6 +62,78 @@ The server listens on the port specified in `HTTP_SERVER_PORT` (default: `8081`)
 | `INFLUXDB_ORG` | InfluxDB organisation | — |
 | `STI_AUTOMATION_ENABLE` | Pre-warm cache on startup (`true`/`false`) | `true` |
 | `IAS_HC_BACKEND_ENABLE` | Enable Health Check backend integration | `true` |
+
+## Build & Deploy
+
+### Makefile Targets
+
+| Target | Description |
+|--------|-------------|
+| `make build` | Build Linux amd64 binary (alias for `build-linux`) |
+| `make build-linux` | Cross-compile for Linux amd64 (`CGO_ENABLED=0 GOOS=linux GOARCH=amd64`) |
+| `make build-mac` | Build for macOS (native arch) |
+| `make docker-build` | Build Linux binary, then Docker image (`ias_sti:latest`) |
+| `make docker-run` | Run container standalone with `.env` |
+| `make compose-up` | Start all services via `docker compose up -d` |
+| `make compose-down` | Stop all services via `docker compose down` |
+| `make clean` | Remove compiled binary |
+
+### Docker Compose (Linux x86)
+
+This guide walks through building and running the full stack on a Linux x86 host.
+
+#### 1. Install Docker & Docker Compose
+
+```bash
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER
+# Log out and back in for group changes to take effect
+
+# Docker Compose plugin (Debian/Ubuntu)
+sudo apt install docker-compose-plugin
+
+# Docker Compose plugin (RHEL/CentOS/Fedora)
+sudo yum install docker-compose-plugin
+```
+
+#### 2. Configure Environment
+
+```bash
+cp .env.example .env
+# Edit .env with your database credentials
+```
+
+> When using docker-compose, set `REDIS_HOST=redis` (the service name in `docker-compose.yml`). The Redis container is internal-only — not exposed to the host.
+
+#### 3. Build & Start
+
+```bash
+make docker-build   # compile Linux binary + build Docker image
+make compose-up     # start Redis, API, and Dozzle
+```
+
+#### 4. Verify
+
+```bash
+curl http://localhost:8080/GET_ALL_TREE_SENSOR
+docker compose logs -f   # tail all logs in real time
+```
+
+> Dozzle log viewer is available at `http://<host>:8888`
+
+#### 5. Stop
+
+```bash
+make compose-down
+```
+
+### Compose Services
+
+| Service | Image | Port (host) | Notes |
+|---------|-------|-------------|-------|
+| `api` | `ias_sti:latest` | `8080` | Your application |
+| `redis` | `redis:7-alpine` | internal only | In-memory cache with AOF persistence |
+| `dozzle` | `amir20/dozzle:latest` | `8888` | Web-based Docker log viewer |
 
 ## API Reference
 
