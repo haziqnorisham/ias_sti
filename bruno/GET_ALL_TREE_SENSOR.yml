@@ -1,0 +1,12 @@
+info:
+  name: Get All Tree Sensors
+  type: http
+  seq: 1
+
+http:
+  method: GET
+  url: "{{baseUrl}}/GET_ALL_TREE_SENSOR"
+
+settings:
+  encodeUrl: true
+  followRedirects: true

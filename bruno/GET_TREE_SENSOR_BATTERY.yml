@@ -1,0 +1,17 @@
+info:
+  name: Get Tree Sensor Battery
+  type: http
+  seq: 2
+
+http:
+  method: GET
+  url: "{{baseUrl}}/GET_TREE_SENSOR_BATTERY"
+  params:
+    - name: dev_eui
+      value: ""
+      type: query
+      disabled: false
+
+settings:
+  encodeUrl: true
+  followRedirects: true
