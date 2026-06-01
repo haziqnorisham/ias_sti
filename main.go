@@ -116,6 +116,9 @@ func registerRoutes(rdb *redis_lib.Client) {
 	http.HandleFunc("/GET_ALL_TREE_SENSOR", func(w http.ResponseWriter, r *http.Request) {
 		getAllTreeSensorHandler(w, r, rdb)
 	})
+	http.HandleFunc("/GET_ALL_TREES", func(w http.ResponseWriter, r *http.Request) {
+		getAllTreesHandler(w, r, rdb)
+	})
 	http.HandleFunc("/GET_TREE_SENSOR_BATTERY", func(w http.ResponseWriter, r *http.Request) {
 		getTreeSensorBatteryHandler(w, r, rdb)
 	})

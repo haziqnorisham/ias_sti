@@ -59,7 +59,20 @@ type PpjTreeSensor struct {
 
 type EnrichedTreeSensor struct {
 	PpjTreeSensor
-	BatteryLevel *float64 `json:"battery_level"`
+	BatteryLevel  *float64 `json:"battery_level"`
+	AngleX        *float64 `json:"x"`
+	AngleY        *float64 `json:"y"`
+	AngleZ        *float64 `json:"z"`
+	AngleTime     *string  `json:"time"`
+	TiltMagnitude *float64 `json:"tilt_magnitude"`
+	MagnitudeMin  *float64 `json:"magnitude_min"`
+	MagnitudeMax  *float64 `json:"magnitude_max"`
+	DiffMag       *float64 `json:"diff_mag"`
+	IsDanger      bool     `json:"is_danger"`
+	TreeIDLower   *string  `json:"tree_id"`
+	TreeIDLink    string   `json:"tree_id_link"`
+	NormalCount   int      `json:"normal_count"`
+	DangerCount   int      `json:"danger_count"`
 }
 
 func NewPostgresStorage(db *sql.DB) *PostgresStorage {

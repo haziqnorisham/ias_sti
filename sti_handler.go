@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	influxdb_utils "ias_sti/db/influxdb"
+	"math"
 
 	ias_pg "ias_sti/db/pg"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 
 	redis_lib "github.com/redis/go-redis/v9"
@@ -25,12 +28,6 @@ func getAllTreeSensorHandler(w http.ResponseWriter, r *http.Request, rdb *redis_
 }
 
 func getAllTreeSensor(rdb *redis_lib.Client, c context.Context) []byte {
-	cacheKey := "all_tree_sensors"
-	cachedData, err := rdb.Get(c, cacheKey).Result()
-	if err == nil && cachedData != "null" {
-		return []byte(cachedData)
-	}
-
 	pg_storage := ias_pg.NewPostgresStorage(nil)
 	sensors, err := pg_storage.QueryData("select * from ppj_tree_sensor")
 	if err != nil {
@@ -44,6 +41,19 @@ func getAllTreeSensor(rdb *redis_lib.Client, c context.Context) []byte {
 		return []byte(`{"error":"failed to encode response"}`)
 	}
 	return jsonData
+}
+
+func getAllTreesHandler(w http.ResponseWriter, r *http.Request, rdb *redis_lib.Client) {
+	slog.Debug("Inbound HTTP", "process", "net.http", "application", "ias_sti", "endpoint", "/GET_ALL_TREES", "method", r.Method, "remote_addr", r.RemoteAddr)
+	w.Header().Set("Content-Type", "application/json")
+
+	cachedData, err := rdb.Get(r.Context(), "all_trees").Result()
+	if err == nil && cachedData != "null" {
+		w.Write([]byte(cachedData))
+		return
+	}
+
+	w.Write(getAllTreeSensor(rdb, r.Context()))
 }
 
 func buildFluxQueryForTreeSensorBattery(sensor_array []ias_pg.PpjTreeSensor) string {
@@ -239,18 +249,89 @@ func BuildSTICache(rdb *redis_lib.Client) {
 	}
 
 	enriched := make([]ias_pg.EnrichedTreeSensor, 0, len(sensors))
+	baseURL := os.Getenv("DASHBOARD_BASE_URL")
 	for _, sensor := range sensors {
 		e := ias_pg.EnrichedTreeSensor{PpjTreeSensor: sensor}
-		batteryJSON, berr := rdb.Get(c, "battery:"+sensor.DeviceEUI).Result()
-		if berr == nil {
-			var batteryMap map[string]interface{}
-			if json.Unmarshal([]byte(batteryJSON), &batteryMap) == nil {
-				if v, ok := batteryMap["_value"].(float64); ok {
+
+		if bJSON, err := rdb.Get(c, "battery:"+sensor.DeviceEUI).Result(); err == nil {
+			var bMap map[string]interface{}
+			if json.Unmarshal([]byte(bJSON), &bMap) == nil {
+				if v, ok := bMap["_value"].(float64); ok {
 					e.BatteryLevel = &v
 				}
 			}
 		}
+
+		if aJSON, err := rdb.Get(c, "angle:"+sensor.DeviceEUI).Result(); err == nil {
+			var aMap map[string]interface{}
+			if json.Unmarshal([]byte(aJSON), &aMap) == nil {
+				if v, ok := aMap["device_frmpayload_data_angle_x"].(float64); ok {
+					e.AngleX = &v
+				}
+				if v, ok := aMap["device_frmpayload_data_angle_y"].(float64); ok {
+					e.AngleY = &v
+				}
+				if v, ok := aMap["device_frmpayload_data_angle_z"].(float64); ok {
+					e.AngleZ = &v
+				}
+				if v, ok := aMap["_time"].(string); ok {
+					e.AngleTime = &v
+				}
+			}
+		}
+
+		if e.AngleX != nil && e.AngleZ != nil {
+			tm := math.Sqrt(*e.AngleX**e.AngleX + *e.AngleZ**e.AngleZ)
+			e.TiltMagnitude = &tm
+		}
+
+		if mJSON, err := rdb.Get(c, "magnitude_min:"+sensor.DeviceEUI).Result(); err == nil {
+			var mMap map[string]interface{}
+			if json.Unmarshal([]byte(mJSON), &mMap) == nil {
+				if v, ok := mMap["_value"].(float64); ok {
+					e.MagnitudeMin = &v
+				}
+			}
+		}
+
+		if mJSON, err := rdb.Get(c, "magnitude_max:"+sensor.DeviceEUI).Result(); err == nil {
+			var mMap map[string]interface{}
+			if json.Unmarshal([]byte(mJSON), &mMap) == nil {
+				if v, ok := mMap["_value"].(float64); ok {
+					e.MagnitudeMax = &v
+				}
+			}
+		}
+
+		if e.MagnitudeMin != nil && e.MagnitudeMax != nil {
+			dm := *e.MagnitudeMax - *e.MagnitudeMin
+			e.DiffMag = &dm
+		}
+
+		if e.DiffMag != nil && sensor.DisplacementAlertAngle != nil {
+			e.IsDanger = *e.DiffMag >= float64(*sensor.DisplacementAlertAngle)
+		}
+
+		e.TreeIDLower = sensor.TreeID
+
+		if sensor.TreeID != nil && baseURL != "" {
+			treeID := *sensor.TreeID
+			e.TreeIDLink = fmt.Sprintf(`<a href="%s/d/cf8156k1469z4e/detailed-tree-tilt-monitoring-dev?orgId=1&var-tree_id=%s&var-tree_url=%s&var-tree_name=%s&from=now-7d&to=now">%s</a>`, baseURL, treeID, treeID, treeID, treeID)
+		}
+
 		enriched = append(enriched, e)
+	}
+
+	dangerCount := 0
+	for _, e := range enriched {
+		if e.IsDanger {
+			dangerCount++
+		}
+	}
+	normalCount := len(enriched) - dangerCount
+	for i := range enriched {
+		enriched[i].NormalCount = normalCount
+		enriched[i].DangerCount = dangerCount
 	}
 
 	jsonData, err := json.Marshal(enriched)
@@ -259,7 +340,7 @@ func BuildSTICache(rdb *redis_lib.Client) {
 		return
 	}
 
-	err = rdb.Set(c, "all_tree_sensors", jsonData, 0).Err()
+	err = rdb.Set(c, "all_trees", jsonData, 0).Err()
 	if err != nil {
 		slog.Error("BuildSTICache: failed to cache enriched sensors", "error", err)
 	}
